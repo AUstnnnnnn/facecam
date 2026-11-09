@@ -246,9 +246,10 @@ class Window(QWidget):
         q = QUrl(url)
         if q.isLocalFile():
             path = q.toLocalFile()
-            # A network-share path (file://host/..., \\host\...) would make Windows
-            # send the user's login hash to that host, so only plain local paths.
-            if q.host() or path.startswith(("\\\\", "//")):
+            # A network-share path (file://host/..., \\host\..., mixed slashes) would
+            # make Windows send the user's login hash to that host, so only accept
+            # drive-letter paths like C:\...
+            if q.host() or not re.match(r"[A-Za-z]:[\\/]", path):
                 return QImage()
             return QImage(path)
         if q.scheme() not in ("http", "https", "data"):
