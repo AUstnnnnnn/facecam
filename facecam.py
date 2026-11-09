@@ -53,7 +53,7 @@ def selftest():
 
 # ─── UI ────────────────────────────────────────────────────────────────────
 
-from PySide6.QtCore import Qt, QThread, Signal  # noqa: E402
+from PySide6.QtCore import Qt, QThread, QUrl, Signal  # noqa: E402
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPainterPath  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout,  # noqa: E402
                                QLabel, QPushButton, QVBoxLayout, QWidget)
@@ -243,13 +243,19 @@ class Window(QWidget):
         self.use(img)
 
     def fetch(self, url):
-        if not url:
+        q = QUrl(url)
+        if q.isLocalFile():
+            path = q.toLocalFile()
+            # A network-share path (file://host/..., \\host\...) would make Windows
+            # send the user's login hash to that host, so only plain local paths.
+            if q.host() or path.startswith(("\\\\", "//")):
+                return QImage()
+            return QImage(path)
+        if q.scheme() not in ("http", "https", "data"):
             return QImage()
-        if url.startswith("file:"):
-            return QImage(url[8:] if url.startswith("file:///") else url[5:])
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            return QImage.fromData(urllib.request.urlopen(req, timeout=10).read())
+            return QImage.fromData(urllib.request.urlopen(req, timeout=10).read(20_000_000))
         except Exception:
             return QImage()
 
