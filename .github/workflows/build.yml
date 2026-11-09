@@ -1,0 +1,45 @@
+name: build
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      # insightface has no Windows wheel on PyPI and building it needs Visual
+      # Studio, so build it once here and publish it for install.bat.
+      - name: Build insightface wheel
+        shell: bash
+        run: |
+          uv venv -p 3.12 build-env
+          uv pip install --python build-env/Scripts/python.exe pip wheel setuptools cython "numpy>=2"
+          build-env/Scripts/python.exe -m pip wheel insightface==0.7.3 --no-deps --no-build-isolation -w wheels
+          ls wheels
+
+      - name: Publish wheel
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view wheels >/dev/null 2>&1 || gh release create wheels --title "Prebuilt wheels" --notes "insightface 0.7.3 for Windows, Python 3.12. install.bat downloads it."
+          gh release upload wheels wheels/*.whl --clobber
+
+      - name: Install
+        shell: cmd
+        env:
+          FACECAM_CI: "1"
+          FACECAM_WHEEL: wheels\insightface-0.7.3-cp312-cp312-win_amd64.whl
+        run: install.bat
+
+      - name: Self-test (CPU, demo frames)
+        shell: cmd
+        env:
+          FACECAM_CPU: "1"
+        run: .venv\Scripts\python.exe facecam.py --selftest
