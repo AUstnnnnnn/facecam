@@ -1,7 +1,7 @@
-"""End-to-end check on a Windows runner: real window (offscreen), real drops,
+"""End-to-end check on a Windows runner: real window, real drops,
 real models, real OBS Virtual Camera. Only the webcam is faked (CI has none).
 
-    set QT_QPA_PLATFORM=offscreen & set FACECAM_CPU=1
+    set FACECAM_CPU=1
     .venv\\Scripts\\python.exe .github\\e2e.py
 """
 import os
