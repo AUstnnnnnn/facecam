@@ -1,24 +1,41 @@
 """Facecam for Windows.
 
-Drop a face photo, pick your camera, press Start. The swapped video goes to
+Drop a face photo (or a few of the same person, which are blended for a
+closer match), pick your camera, press Start. The swapped video goes to
 OBS Virtual Camera, which Discord (or Zoom, Meet...) can pick as a camera.
 
     python facecam.py             open the window
     python facecam.py --selftest  swap two demo frames, no camera needed
 """
+import glob
 import os
 import re
 import sys
+import time
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, "engine")  # Deep-Live-Cam, unpacked by install.bat
-FACE = os.path.join(HERE, "face.png")
+FACES = os.path.join(HERE, "faces")  # photos of one person, blended; newest last
+MAX_FACES = 5
 sys.path.insert(0, ENGINE)
 os.chdir(ENGINE)
 
 import cv2  # noqa: E402
+import numpy as np  # noqa: E402
 import onnxruntime  # noqa: E402
+
+
+# Dim light drops detector confidence below insightface's 0.5 default, so the
+# swap blinks on and off. Detect more leniently and coast over short misses.
+DET_THRESH = 0.35
+HOLD_FRAMES = 8  # ~0.25 s at 30 fps
+
+
+def lift(f):
+    """Brightened copy for face detection only; the swap still uses the real frame."""
+    m = f.mean()
+    return f if m >= 90 else cv2.convertScaleAbs(f, alpha=min(8.0, 110 / max(m, 1.0)))
 
 
 def load():
@@ -31,7 +48,27 @@ def load():
     from modules.processors.frame import face_swapper as fs
     if fs.get_face_swapper() is None:
         raise RuntimeError("couldn't download the face swap model, check your internet")
+    from modules.face_analyser import get_face_analyser
+    get_face_analyser().det_model.det_thresh = DET_THRESH
     return get_one_face, fs
+
+
+def face_files():
+    return sorted(glob.glob(os.path.join(FACES, "*.png")))
+
+
+def blended_face(get_one_face, paths=None):
+    """One face from every photo that has one. The swap model only reads the
+    identity embedding, so averaging it over several angles and lights gives a
+    closer, steadier likeness."""
+    imgs = (cv2.imread(p) for p in (paths or face_files()))
+    faces = [f for f in (get_one_face(i) for i in imgs if i is not None) if f is not None]
+    if not faces:
+        return None
+    face = faces[0]
+    if len(faces) > 1:
+        face.embedding = np.mean([f.normed_embedding for f in faces], axis=0)
+    return face
 
 
 def selftest():
@@ -48,13 +85,22 @@ def selftest():
     assert src is not None and face is not None, "no face found in demo frames"
     out = fs.process_frame(src, tgt.copy(), face)
     assert out.shape == tgt.shape and (out != tgt).any(), "swap changed nothing"
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        paths = []
+        for i, at in enumerate((0, 6)):
+            paths.append(os.path.join(d, f"{i}.png"))
+            cv2.imwrite(paths[-1], first_frame("ludwig.gif", at))
+        blend = blended_face(get_one_face, paths)
+        one = get_one_face(cv2.imread(paths[0]))
+        assert blend is not None and float(blend.normed_embedding @ one.normed_embedding) > 0.8, "blend broke"
     print("selftest ok")
 
 
 # ─── UI ────────────────────────────────────────────────────────────────────
 
 from PySide6.QtCore import Qt, QThread, QUrl, Signal  # noqa: E402
-from PySide6.QtGui import QImage, QPixmap, QPainter, QPainterPath  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout,  # noqa: E402
                                QLabel, QPushButton, QVBoxLayout, QWidget)
 
@@ -101,22 +147,25 @@ class Worker(QThread):
                 vcam = pyvirtualcam.Camera(w, h, 30, fmt=pyvirtualcam.PixelFormat.BGR, backend="obs")
             except Exception:
                 return self.status.emit("OBS Virtual Camera not found. Install OBS Studio, then press Start again.", True)
-            src = None
+            src, last, missed = None, None, 0
             with vcam:
                 while self.running:
                     if self.reload_face:
                         self.reload_face = False
-                        img = cv2.imread(FACE)
-                        src = get_one_face(img) if img is not None else None
+                        src = blended_face(get_one_face)
                         if src is None:
-                            self.status.emit("No face found in that photo. Try a clear, front-facing one.", True)
+                            self.status.emit("No face found in those photos. Try clear, front-facing ones.", True)
                         else:
                             self.status.emit("Live. In Discord, pick OBS Virtual Camera.", False)
                     ok, f = cap.read()
                     if not ok:
                         continue
                     if src is not None:
-                        target = get_one_face(f)
+                        target = get_one_face(lift(f))
+                        if target is not None:
+                            last, missed = target, 0
+                        elif missed < HOLD_FRAMES:
+                            target, missed = last, missed + 1
                         if target is not None:
                             f = fs.process_frame(src, f, target)
                     vcam.send(f)
@@ -126,8 +175,8 @@ class Worker(QThread):
             cap.release()
 
 
-def rounded(pix: QPixmap, w: int, h: int, r: int = 10) -> QPixmap:
-    """Scale-to-fill and clip to a rounded rect."""
+def rounded(pix: QPixmap, w: int, h: int, r: int = 10, thumbs=()) -> QPixmap:
+    """Scale-to-fill, clip to a rounded rect, and draw a strip of face thumbnails."""
     pix = pix.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                      Qt.TransformationMode.SmoothTransformation)
     out = QPixmap(w, h)
@@ -138,6 +187,19 @@ def rounded(pix: QPixmap, w: int, h: int, r: int = 10) -> QPixmap:
     path.addRoundedRect(0, 0, w, h, r, r)
     p.setClipPath(path)
     p.drawPixmap((w - pix.width()) // 2, (h - pix.height()) // 2, pix)
+    p.setClipping(False)
+    for i, t in enumerate(thumbs):
+        x, y, size = 10 + i * 42, h - 46, 36
+        t = t.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                     Qt.TransformationMode.SmoothTransformation)
+        box = QPainterPath()
+        box.addRoundedRect(x, y, size, size, 7, 7)
+        p.save()
+        p.setClipPath(box)
+        p.drawPixmap(x - (t.width() - size) // 2, y - (t.height() - size) // 2, t)
+        p.restore()
+        p.setPen(QPen(QColor(255, 255, 255, 230), 1.5))
+        p.drawPath(box)
     p.end()
     return out
 
@@ -148,7 +210,8 @@ class Window(QWidget):
     def __init__(self):
         super().__init__()
         self.worker = None
-        self.has_face = os.path.exists(FACE)
+        self.has_face = bool(face_files())
+        self.thumbs = [QPixmap(f) for f in face_files()]
         self.setWindowTitle("Facecam")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         self.setAcceptDrops(True)
@@ -157,6 +220,15 @@ class Window(QWidget):
         self.stage.setFixedSize(self.STAGE_W, self.STAGE_H)
         self.stage.setCursor(Qt.CursorShape.PointingHandCursor)
         self.stage.mousePressEvent = lambda e: self.choose()
+        self.clear = QPushButton("Clear", self.stage)
+        self.clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear.setToolTip("Remove all photos to start on a different person")
+        self.clear.setStyleSheet("QPushButton { background: rgba(0,0,0,150); color: white; border: none;"
+                                 " border-radius: 11px; padding: 4px 10px; font-weight: 600; }"
+                                 "QPushButton:hover { background: rgba(0,0,0,200); }")
+        self.clear.adjustSize()
+        self.clear.move(self.STAGE_W - self.clear.width() - 10, 10)
+        self.clear.clicked.connect(self.clear_faces)
 
         self.cameras = QComboBox()
         for i, name in list_cameras():
@@ -183,7 +255,7 @@ class Window(QWidget):
         if self.cameras.count() == 0:
             self.say("No camera found. Plug one in and reopen Facecam.", True)
         else:
-            self.say("Ready" if self.has_face else "Pick a face, then press Start")
+            self.say(self.ready_text() if self.has_face else "Pick a face, then press Start")
         self.sync()
 
     # ── state ──
@@ -193,30 +265,40 @@ class Window(QWidget):
         self.start.setEnabled(live or (self.has_face and self.cameras.count() > 0))
         self.cameras.setEnabled(not live)
 
+    def ready_text(self):
+        n = len(self.thumbs)
+        return "Ready. Add more photos of them for a closer match." if n == 1 else f"Ready. Blending {n} photos."
+
     def say(self, text, error=False):
         self.status.setText(text)
         self.status.setStyleSheet(f"color: {ERROR_RED};" if error else "color: palette(placeholder-text);")
 
+    def strip(self, live):
+        return self.thumbs if live or len(self.thumbs) > 1 else ()
+
     def show_idle(self, hover=False):
+        self.clear.setVisible(self.has_face and not hover)
         if self.has_face and not hover:
             self.stage.setStyleSheet("border: none;")
-            self.stage.setPixmap(rounded(QPixmap(FACE), self.STAGE_W, self.STAGE_H))
+            self.stage.setPixmap(rounded(self.thumbs[-1], self.STAGE_W, self.STAGE_H, thumbs=self.strip(False)))
         else:
             self.stage.setPixmap(QPixmap())
             edge = "2px solid palette(highlight)" if hover else "1px dashed palette(mid)"
             self.stage.setStyleSheet(f"border: {edge}; border-radius: 10px;")
-            self.stage.setText("<b style='font-size:15px'>Drop to use this face</b>" if hover else
+            self.stage.setText(f"<b style='font-size:15px'>{'Drop to add this photo' if self.has_face else 'Drop to use this face'}</b>"
+                               if hover else
                                "<b style='font-size:15px'>Drop a face photo</b><br>"
                                "<span style='color:palette(placeholder-text)'>"
-                               "Drag one from your browser, or click to choose</span>")
+                               "Drag one from your browser, or click to choose.<br>"
+                               "A few photos of the same person match closer.</span>")
 
     # ── face photo ──
     def choose(self):
         if self.worker:
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Choose a face photo", "",
-                                              "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
-        if path:
+        paths, _ = QFileDialog.getOpenFileNames(self, "Choose photos of the same person", "",
+                                                "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
+        for path in paths:
             self.use(QImage(path))
 
     def dragEnterEvent(self, e):
@@ -233,6 +315,11 @@ class Window(QWidget):
     def dropEvent(self, e):
         md = e.mimeData()
         img = QImage(md.imageData()) if md.hasImage() else QImage()
+        local = [u.toString() for u in md.urls() if u.isLocalFile()]
+        if img.isNull() and len(local) > 1:  # several files from Explorer
+            for u in local:
+                self.use(self.fetch(u))
+            return
         if img.isNull():
             # Browsers mostly hand over the picture's address, sometimes only as HTML.
             url = md.urls()[0].toString() if md.hasUrls() else ""
@@ -262,15 +349,29 @@ class Window(QWidget):
 
     def use(self, img: QImage):
         if img.isNull():
-            self.show_idle()
+            if not self.worker:
+                self.show_idle()
             return self.say("That wasn't an image. Try dragging the picture itself.", True)
-        img.save(FACE, "PNG")  # one format OpenCV always reads
+        os.makedirs(FACES, exist_ok=True)
+        img.save(os.path.join(FACES, f"{time.time_ns()}.png"), "PNG")  # one format OpenCV always reads
+        for old in face_files()[:-MAX_FACES]:
+            os.remove(old)
+        self.thumbs = [QPixmap(f) for f in face_files()]
         self.has_face = True
         if self.worker:
             self.worker.reload_face = True
         else:
             self.show_idle()
-            self.say("Ready")
+            self.say(self.ready_text())
+        self.sync()
+
+    def clear_faces(self):
+        for f in face_files():
+            os.remove(f)
+        self.thumbs, self.has_face = [], False
+        if not self.worker:
+            self.show_idle()
+            self.say("Pick a face, then press Start")
         self.sync()
 
     # ── run ──
@@ -280,7 +381,7 @@ class Window(QWidget):
             return
         self.worker = Worker(self.cameras.currentData())
         self.worker.frame.connect(lambda img: self.stage.setPixmap(
-            rounded(QPixmap.fromImage(img), self.STAGE_W, self.STAGE_H)))
+            rounded(QPixmap.fromImage(img), self.STAGE_W, self.STAGE_H, thumbs=self.strip(True))))
         self.worker.status.connect(self.say)
         self.worker.finished.connect(self.ended)
         self.stage.setStyleSheet("border: none;")
@@ -292,7 +393,7 @@ class Window(QWidget):
         self.worker = None
         self.show_idle()
         if not error:
-            self.say("Ready")
+            self.say(self.ready_text() if self.has_face else "Pick a face, then press Start")
         self.sync()
 
     def closeEvent(self, e):

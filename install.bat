@@ -27,7 +27,6 @@ findstr /v /i "onnxruntime opennsfw2 keras insightface" engine\requirements.txt 
 uv pip install --python %PY% "%FACECAM_WHEEL%" || goto :fail
 uv pip install --python %PY% -r reqs.txt onnxruntime-directml pyvirtualcam || goto :fail
 
-if defined FACECAM_CI goto :done
 echo [4/5] OBS Studio (provides the virtual camera Discord sees)...
 if not exist "%ProgramFiles%\obs-studio\bin\64bit\obs64.exe" (
   winget install -e --id OBSProject.OBSStudio --accept-package-agreements --accept-source-agreements || echo   Couldn't install OBS automatically. Get it from https://obsproject.com
@@ -35,7 +34,6 @@ if not exist "%ProgramFiles%\obs-studio\bin\64bit\obs64.exe" (
 echo [5/5] Visual C++ runtime...
 winget install -e --id Microsoft.VCRedist.2015+.x64 --accept-package-agreements --accept-source-agreements >nul 2>&1
 
-:done
 echo.
 echo Done. Double-click Facecam.bat to start.
 if not defined FACECAM_CI pause

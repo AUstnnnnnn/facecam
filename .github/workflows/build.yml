@@ -43,3 +43,17 @@ jobs:
         env:
           FACECAM_CPU: "1"
         run: .venv\Scripts\python.exe facecam.py --selftest
+
+      - name: End to end (window, drops, swap, OBS Virtual Camera)
+        shell: cmd
+        env:
+          FACECAM_CPU: "1"
+          QT_QPA_PLATFORM: offscreen
+          E2E_OUT: e2e-out
+        run: .venv\Scripts\python.exe .github\e2e.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-screens
+          path: engine/e2e-out

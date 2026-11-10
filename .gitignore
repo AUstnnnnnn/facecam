@@ -1,7 +1,7 @@
 engine/
 .venv/
-face.png
 reqs.txt
 wheels/
 build-env/
 __pycache__/
+faces/

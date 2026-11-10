@@ -12,11 +12,11 @@ It's a small window around [Deep-Live-Cam](https://github.com/hacksider/Deep-Liv
 ## Use it
 
 1. Double-click **Facecam.bat**.
-2. Drag a face photo into the window. You can drag it straight from Google Images in your browser, or click the box to pick a file. A clear photo of someone looking at the camera works best.
+2. Drag a face photo into the window. You can drag it straight from Google Images in your browser, or click the box to pick a file. A clear photo of someone looking at the camera works best. Drop 3 to 5 photos of the same person (different angles and lighting) and they get blended for a closer match. **Clear** starts over with someone new.
 3. Pick your webcam and press **Start**. The first start downloads the face models (about 500 MB), so give it a minute.
 4. In Discord, go to **User Settings → Voice & Video → Camera** and choose **OBS Virtual Camera**.
 
-You can drop a different photo while it's running to switch faces. Press **Stop** to go back to normal.
+You can drop more photos while it's running; to switch to a different person, press **Clear** first. Press **Stop** to go back to normal.
 
 ## If something goes wrong
 
