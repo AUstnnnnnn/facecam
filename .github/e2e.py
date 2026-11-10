@@ -17,7 +17,7 @@ from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QDropEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-OUT = os.environ.get("E2E_OUT", os.path.join(tempfile.gettempdir(), "facecam-e2e"))
+OUT = os.path.abspath(os.environ.get("E2E_OUT", os.path.join(tempfile.gettempdir(), "facecam-e2e")))
 os.makedirs(OUT, exist_ok=True)
 fc.FACES = tempfile.mkdtemp()  # keep test photos out of the real faces/ folder
 app = QApplication(sys.argv)
@@ -58,7 +58,7 @@ def snap(w, name):
 # ── 1. detection under dim light (the flicker fix) ──
 get_one_face, fs = fc.load()
 movie = gif("movie.gif", 10)
-dark = cv2.convertScaleAbs(movie, alpha=0.12)
+dark = cv2.convertScaleAbs(movie, alpha=0.06)
 assert get_one_face(fc.lift(dark)) is not None, "lift() didn't rescue a dim frame"
 print("dim:", "plain detect", get_one_face(dark) is not None, "| lifted detect True")
 
