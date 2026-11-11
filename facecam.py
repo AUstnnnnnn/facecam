@@ -225,6 +225,19 @@ def load():
     return get_one_face, fs
 
 
+def remove_face(path):
+    """Delete a face photo. Windows refuses while the camera thread has it open to
+    read (a few milliseconds), so retry briefly instead of failing."""
+    for _ in range(40):
+        try:
+            return os.remove(path)
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            time.sleep(0.025)
+    os.remove(path)
+
+
 def face_files():
     return sorted(glob.glob(os.path.join(FACES, "*.png")))
 
@@ -252,7 +265,7 @@ def save_preset(name):
 
 def load_preset(name):
     for f in face_files():
-        os.remove(f)
+        remove_face(f)
     os.makedirs(FACES, exist_ok=True)
     for f in sorted(glob.glob(os.path.join(PRESETS, name, "*.png")))[-MAX_FACES:]:
         # The camera thread may be reading FACES; it must never see half a file.
@@ -808,7 +821,7 @@ class Window(QWidget):
         img.save(path + ".part", "PNG")  # PNG: one format OpenCV always reads
         os.replace(path + ".part", path)  # the camera thread never sees half a file
         for old in face_files()[:-MAX_FACES]:
-            os.remove(old)
+            remove_face(old)
         self.thumbs = [QPixmap(f) for f in face_files()]
         self.has_face = True
         self.set_preset(None)
@@ -822,7 +835,7 @@ class Window(QWidget):
 
     def clear_faces(self):
         for f in face_files():
-            os.remove(f)
+            remove_face(f)
         self.thumbs, self.has_face = [], False
         self.set_preset(None)
         if self.swapping:
