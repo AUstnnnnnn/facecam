@@ -24,7 +24,15 @@ if exist engine\run.py (echo   Already installed.) else (
 )
 
 echo [3/6] Python 3.12 and packages...
-if not exist .venv\Scripts\python.exe (uv venv -p 3.12 .venv || goto :fail)
+rem uv's own Python needs a directory junction; some PCs refuse to follow it
+rem (os error 448, untrusted mount point). Fall back to python.org's 3.12.
+if not exist .venv\Scripts\python.exe (
+  uv venv --clear -p 3.12 .venv || (
+    echo   Falling back to the standard Python 3.12 installer...
+    winget install -e --id Python.Python.3.12 --scope user --accept-package-agreements --accept-source-agreements
+    uv venv --clear -p 3.12 --python-preference only-system .venv || goto :fail
+  )
+)
 set PY=.venv\Scripts\python.exe
 rem Skip the NVIDIA-only runtime and the unused NSFW filter; insightface comes prebuilt.
 findstr /v /i "onnxruntime opennsfw2 keras insightface" engine\requirements.txt > reqs.txt
