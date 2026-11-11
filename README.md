@@ -38,7 +38,7 @@ No admin rights needed. To update, run a newer Facecam-Setup.exe: it skips anyth
 
 1. Open Facecam.
 2. Drag a face photo into the window. You can drag it straight from your browser, or click the box to pick a file. A clear photo of someone looking at the camera works best. Drop 3 to 5 photos of the same person (different angles and lighting) and they get blended for a closer match. **Clear** starts over with someone new.
-3. Pick your webcam and press **Start**.
+3. Pick your webcam. The virtual camera shows you as you are until you press **Start**, then their face scans onto yours. **Stop** scans it back off.
 4. In Discord, go to **User Settings → Voice & Video → Camera** and choose **OBS Virtual Camera**.
 
 Start Facecam before you turn your camera on in Discord. Only one app can use the webcam at a time, and Facecam has to be the one holding it.

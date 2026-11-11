@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 import urllib.request
 
@@ -80,6 +81,135 @@ class Steady:
         self.x = None
 
 
+ORANGE = (26, 106, 255)  # BGR #ff6a1a, the app's accent
+SCAN_SECONDS = 0.9
+OVERLAY = 0.35  # opacity of the orange outline and sweep line
+GLOW = 1.6      # strength of the soft light around them
+STEP = 1 / 15   # most a scan advances per frame, so slow machines still show all of it
+
+
+def ease(p):
+    return 4 * p ** 3 if p < 0.5 else 1 - (-2 * p + 2) ** 3 / 2
+
+
+def add_outline_points(frame, face):
+    """The engine skips the 106-point landmarks to save time; the scan needs them
+    for the face outline, so fetch them only while a scan runs."""
+    if face is None or getattr(face, "landmark_2d_106", None) is not None:
+        return
+    from modules.face_analyser import get_face_analyser
+    model = get_face_analyser().models.get("landmark_2d_106")
+    if model is not None:
+        model.get(frame, face)
+
+
+def face_shape(face, w, h):
+    """Closed outline of the face: the hull of the 106 landmarks, raised over the
+    forehead (the landmarks stop at the brows). No face: the whole frame."""
+    pts = getattr(face, "landmark_2d_106", None) if face is not None else None
+    if pts is None:
+        return np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], np.int32)
+    pts = pts.astype(np.float32)
+    top, chin = pts[:, 1].min(), pts[:, 1].max()
+    # The landmarks stop at the brows, so add a dome over the forehead.
+    cx, half, height = pts[:, 0].mean(), (pts[:, 0].max() - pts[:, 0].min()) / 2, chin - top
+    u = np.linspace(-1, 1, 15)
+    dome = np.stack([cx + u * half * 0.9, top + 0.1 * height - 0.42 * height * np.sqrt(1 - u ** 2)], axis=1)
+    hull = cv2.convexHull(np.vstack([pts, dome]).astype(np.float32)).reshape(-1, 2)
+    for _ in range(3):  # Chaikin: round off the hull's corners
+        nxt = np.roll(hull, -1, axis=0)
+        hull = np.stack([0.75 * hull + 0.25 * nxt, 0.25 * hull + 0.75 * nxt], axis=1).reshape(-1, 2)
+    hull[:, 0] = hull[:, 0].clip(0, w - 1)
+    hull[:, 1] = hull[:, 1].clip(0, h - 1)
+    return hull.astype(np.int32)
+
+
+def trace(img, shape, frac, thick):
+    """Draw the outline from the forehead down both sides, `frac` of the way to the chin."""
+    start = int(np.argmin(shape[:, 1]))
+    ring = np.roll(shape, -start, axis=0)
+    for path in (np.vstack([ring, ring[:1]]), np.vstack([ring[:1], ring[::-1]])):
+        seg = np.linalg.norm(np.diff(path, axis=0), axis=1)
+        left = frac * seg.sum() / 2
+        for (p0, p1), d in zip(zip(path[:-1], path[1:]), seg):
+            if left <= 0:
+                break
+            end = p1 if left >= d else p0 + (p1 - p0) * (left / d)
+            cv2.line(img, tuple(map(int, p0)), tuple(map(int, end)), ORANGE, thick, cv2.LINE_AA)
+            left -= d
+
+
+def scan(a, b, face, p, up=False):
+    """One frame of the scan: an orange outline traces the face, then a line sweeps
+    down it (up, when turning off), leaving face b behind it inside the outline.
+    The rest of the frame eases over to b at the very end so nothing pops.
+    Only the area around the face is worked on, so it stays cheap at 720p."""
+    h, w = a.shape[:2]
+    shape = face_shape(face, w, h)
+    x0, y0 = shape.min(axis=0)
+    x1, y1 = shape.max(axis=0)
+    size = max(x1 - x0, y1 - y0, 1)
+    k = int(size * 0.06) | 1               # mask softening
+    kg = int(size * 0.2) | 1               # glow spread
+    feather = max(6.0, size * 0.03)
+    pad = feather + k                      # the softened mask reaches k past the outline
+    e = ease(min(max(p, 0.0), 1.0))
+    reach = (y1 - y0) + 2 * pad            # start and end a feather past the outline
+    line = int(y1 + pad - e * reach) if up else int(y0 - pad + e * reach)
+    rest = min(max((p - 0.85) / 0.15, 0.0), 1.0)  # outside the face, at the very end
+    out = cv2.addWeighted(a, 1 - rest, b, rest, 0) if rest > 0 else a.copy()
+
+    # Work area: the face plus room for the soft edge and the glow.
+    m_ = int(pad + kg)
+    rx0, ry0 = max(0, int(x0) - m_), max(0, int(y0) - m_)
+    rx1, ry1 = min(w, int(x1) + m_ + 1), min(h, int(y1) + m_ + 1)
+    aR, bR = a[ry0:ry1, rx0:rx1].astype(np.float32), b[ry0:ry1, rx0:rx1].astype(np.float32)
+    rh, rw = aR.shape[:2]
+    local = shape - [rx0, ry0]
+    mask = np.zeros((rh, rw), np.uint8)
+    cv2.fillPoly(mask, [local], 255)
+    soft = cv2.GaussianBlur(mask, (k, k), 0).astype(np.float32)[..., None] / 255
+    rows = np.arange(ry0, ry1, dtype=np.float32)[:, None, None]
+    behind = np.clip(((line - rows) if not up else (rows - line)) / feather + 0.5, 0, 1)
+    o = aR + (bR - aR) * np.maximum(behind * soft, rest)
+
+    thick = max(2, int(size / 90))
+    draw = min(p / 0.25, 1.0)          # outline traces on over the first quarter
+    fade = min(1.0, (1 - p) / 0.2)     # everything lets go over the last fifth
+    stroke = np.zeros((rh, rw, 3), np.uint8)  # the orange marks, drawn on black
+    if fade > 0 and 0 < e < 1:         # the sweep line, only across the face
+        ly = line - ry0
+        cv2.line(stroke, (int(x0) - rx0, ly), (int(x1) - rx0, ly), ORANGE, thick + 1, cv2.LINE_AA)
+        stroke[cv2.dilate(mask, np.ones((3, 3), np.uint8)) == 0] = 0
+    if fade > 0 and draw > 0:
+        trace(stroke, local, ease(draw), thick + 1)
+    if stroke.any():
+        # Blur the glow at quarter size: same look, a fraction of the work.
+        small = cv2.resize(stroke, (max(1, rw // 4), max(1, rh // 4)), interpolation=cv2.INTER_AREA)
+        small = cv2.GaussianBlur(small, ((kg // 4) | 1, (kg // 4) | 1), 0)
+        glow = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        o += glow * GLOW * fade        # light adds; dark rooms glow most
+        st = stroke.astype(np.float32)
+        al = st.max(axis=2, keepdims=True) / 255 * OVERLAY * fade
+        o = o * (1 - al) + st * al
+    out[ry0:ry1, rx0:rx1] = np.clip(o, 0, 255).astype(np.uint8)
+    return out
+    stroke = np.zeros_like(out)        # the orange marks, drawn on black
+    if 0 < e < 1:                      # the sweep line, only across the face
+        cv2.line(stroke, (int(x0), line), (int(x1), line), ORANGE, thick + 1, cv2.LINE_AA)
+        stroke[cv2.dilate(mask, np.ones((3, 3), np.uint8)) == 0] = 0
+    if draw > 0:
+        trace(stroke, shape, ease(draw), thick + 1)
+    if stroke.any():
+        k = int(size * 0.2) | 1
+        glow = cv2.GaussianBlur(stroke, (k, k), 0).astype(np.float32)
+        o = out.astype(np.float32) + glow * GLOW * fade  # light adds; dark rooms glow most
+        s = stroke.astype(np.float32)
+        a_ = s.max(axis=2, keepdims=True) / 255 * OVERLAY * fade
+        out = np.clip(o * (1 - a_) + s * a_, 0, 255).astype(np.uint8)
+    return out
+
+
 def load():
     """Load Deep-Live-Cam's face detector and swapper on the GPU via DirectML."""
     import modules.globals as g
@@ -125,7 +255,10 @@ def load_preset(name):
         os.remove(f)
     os.makedirs(FACES, exist_ok=True)
     for f in sorted(glob.glob(os.path.join(PRESETS, name, "*.png")))[-MAX_FACES:]:
-        shutil.copy2(f, FACES)
+        # The camera thread may be reading FACES; it must never see half a file.
+        tmp = os.path.join(FACES, os.path.basename(f) + ".part")
+        shutil.copy2(f, tmp)
+        os.replace(tmp, tmp[:-5])
 
 
 def blended_face(get_one_face, paths=None):
@@ -175,6 +308,15 @@ def selftest():
     assert src is not None and face is not None, "no face found in demo frames"
     out = fs.process_frame(src, tgt.copy(), face)
     assert out.shape == tgt.shape and (out != tgt).any(), "swap changed nothing"
+    # Scan: starts on the old frame, ends on the swap everywhere, touches only the face midway.
+    add_outline_points(tgt, face)
+    assert face.landmark_2d_106 is not None, "no outline points"
+    for up in (False, True):
+        assert (scan(tgt, out, face, 0.0, up) == tgt).all(), "scan didn't start on the old frame"
+        assert (scan(tgt, out, face, 1.0, up) == out).all(), "scan didn't land on the swap"
+    x0, x1 = int(face.bbox[0]), int(face.bbox[2])
+    away = max(1, x0 - (x1 - x0))
+    assert (scan(tgt, out, face, 0.5)[:, :away] == tgt[:, :away]).all(), "mid-scan touched pixels outside the face"
 
     st = Steady()  # still noisy points settle, a real move is followed
     rng = np.random.default_rng(0)
@@ -266,14 +408,19 @@ def list_cameras():
 
 
 class Worker(QThread):
-    frame = Signal(QImage)
+    """Holds the webcam from launch and feeds OBS Virtual Camera. You go out as you
+    are until `on` is set; then the face scans in (and back out when it's cleared)."""
+    frame = Signal(object)  # RGB numpy frame; the QImage is made on the UI thread
     status = Signal(str, bool)  # message, is_error
+    mode = Signal(str)          # "you" or "swapping", once frames are flowing
 
     def __init__(self, camera_index):
         super().__init__()
         self.camera_index = camera_index
         self.running = True
+        self.on = False
         self.reload_face = True
+        self.ready = False  # models loaded
 
     def run(self):
         try:
@@ -282,12 +429,17 @@ class Worker(QThread):
             print(f"Stopped: {e!r}", file=sys.stderr)
             self.status.emit(f"Stopped: {e}. Details are in facecam.log.", True)
 
+    def _load(self):
+        try:
+            self.fns = load()
+            self.ready = True
+        except Exception as e:
+            print(f"Models: {e!r}", file=sys.stderr)
+            self.status.emit(f"Couldn't load the face models: {e}", True)
+
     def _run(self):
         import pyvirtualcam
         from modules.video_capture import VideoCapturer
-        self.status.emit("Loading models…" if models_present() else
-                         "Downloading the face models (about 800 MB, first start only)…", False)
-        get_one_face, fs = load()
         cap = VideoCapturer(self.camera_index)
         if not cap.start(1280, 720, 30):
             return self.status.emit(camera_busy_message(), True)
@@ -300,20 +452,50 @@ class Worker(QThread):
                 vcam = pyvirtualcam.Camera(w, h, 30, fmt=pyvirtualcam.PixelFormat.BGR, backend="obs")
             except Exception:
                 return self.status.emit("OBS Virtual Camera not found. Install OBS Studio, then press Start again.", True)
-            src, last, missed, steady = None, None, 0, Steady()
+            # Frames go out from here on; the models load alongside so Start is quick.
+            threading.Thread(target=self._load, daemon=True).start()
+            src, shown, trans, was_on = None, None, None, False  # trans: [from, to, progress, upward]
+            tick = time.monotonic()
+            last, missed, steady = None, 0, Steady()
             with vcam:
+                self.mode.emit("you")
                 while self.running:
-                    if self.reload_face:
+                    if self.ready and self.reload_face:
                         self.reload_face = False
-                        src = blended_face(get_one_face)
-                        if src is None:
-                            self.status.emit("No face found in those photos. Try clear, front-facing ones.", True)
+                        new = blended_face(self.fns[0])
+                        if new is None:
+                            if self.on:
+                                self.status.emit("No face found in those photos. Try clear, front-facing ones.", True)
                         else:
-                            self.status.emit("Live. In Discord, pick OBS Virtual Camera.", False)
+                            if shown is not None:  # wearing the old face: scan across to the new one
+                                trans, shown = [shown, new, 0.0, False], new
+                            src = new
+                    if self.ready and self.on != was_on:
+                        if self.on and src is None:
+                            self.on = False
+                            self.status.emit("No face found in those photos. Try clear, front-facing ones.", True)
+                            self.mode.emit("you")
+                        elif self.on:
+                            trans, shown = [shown, src, 0.0, False], src
+                            self.mode.emit("swapping")
+                        elif shown is not None:
+                            trans, shown = [shown, None, 0.0, True], None
+                            self.mode.emit("you")
+                        was_on = self.on
                     ok, f = cap.read()
                     if not ok:
                         continue
-                    if src is not None:
+                    now = time.monotonic()
+                    dt, tick = min(now - tick, STEP), now
+                    if trans:
+                        trans[2] += dt / SCAN_SECONDS
+                    p = trans[2] if trans else 1.0
+                    if p >= 1:
+                        trans = None
+                    faces = (trans[0], trans[1]) if trans else (shown,)
+                    target = None
+                    if any(x is not None for x in faces):
+                        get_one_face, fs = self.fns
                         target = get_one_face(lift(f))
                         if target is not None:
                             target.kps = steady(target.kps)
@@ -322,11 +504,20 @@ class Worker(QThread):
                             target, missed = last, missed + 1
                         else:
                             steady.reset()  # face gone; don't glide in from where it was
-                        if target is not None:
-                            f = fs.process_frame(src, f, target)
-                    vcam.send(f)
-                    rgb = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-                    self.frame.emit(QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy())
+
+                    def look(face, f=f, t=target):
+                        # process_frame writes into the frame it's given, so hand it a copy.
+                        return f if face is None or t is None else self.fns[1].process_frame(face, f.copy(), t)
+
+                    if trans:
+                        add_outline_points(f, target)
+                        out = scan(look(trans[0]), look(trans[1]), target, p, trans[3])
+                    else:
+                        out = look(shown)
+                    vcam.send(out)
+                    # Plain array, not a QImage: Qt objects made on this thread and freed
+                    # on the UI thread crash PySide's cleanup under load.
+                    self.frame.emit(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
         finally:
             cap.release()
 
@@ -382,6 +573,9 @@ class Window(QWidget):
     def __init__(self):
         super().__init__()
         self.worker = None
+        self.live = False      # worker is sending frames
+        self.swapping = False  # wearing the face (Start pressed)
+        self.reopen = False    # camera changed: start a new worker when this one ends
         self.has_face = bool(face_files())
         self.thumbs = [QPixmap(f) for f in face_files()]
         self.preset = None  # name of the preset on screen, until the photos change
@@ -411,6 +605,7 @@ class Window(QWidget):
         self.cameras = QComboBox()
         for i, name in list_cameras():
             self.cameras.addItem(name, i)
+        self.cameras.currentIndexChanged.connect(self.switch_camera)
         self.start = QPushButton("Start", objectName="primary")
         self.start.setDefault(True)
         self.start.setMinimumWidth(96)
@@ -444,17 +639,17 @@ class Window(QWidget):
             self.say("No camera found. Plug one in and reopen Facecam.", True)
         else:
             self.say(self.ready_text() if self.has_face else "Pick a face, then press Start")
+            self.open_camera()  # you go out on the virtual camera from the start
         self.sync()
 
     # ── state ──
     def sync(self):
-        live = self.worker is not None
-        self.start.setText("Stop" if live else "Start")
-        self.start.setProperty("live", live)
+        self.start.setText("Stop" if self.swapping else "Start")
+        self.start.setProperty("live", self.swapping)
         self.start.style().unpolish(self.start)
         self.start.style().polish(self.start)
-        self.start.setEnabled(live or (self.has_face and self.cameras.count() > 0))
-        self.cameras.setEnabled(not live)
+        self.start.setEnabled(self.swapping or (self.has_face and self.cameras.count() > 0))
+        self.start.setToolTip("Scan back to your own face" if self.swapping else "Scan their face onto yours")
 
     # ── presets ──
     def fill_presets_menu(self):
@@ -500,8 +695,9 @@ class Window(QWidget):
         self.set_preset(name)
         if self.worker:
             self.worker.reload_face = True
-        else:
+        if not self.live:
             self.show_idle()
+        if not self.swapping:
             self.say(self.ready_text() if self.has_face else "That preset has no photos.", not self.has_face)
         self.sync()
 
@@ -516,6 +712,12 @@ class Window(QWidget):
 
     def ready_text(self):
         n = len(self.thumbs)
+        if self.live:
+            return ("Camera on, showing you. Drop a photo to wear their face." if n == 0 else
+                    "Showing you. Press Start to switch faces." if n == 1 else
+                    f"Showing you. Press Start to wear a blend of {n} photos.")
+        if n == 0:
+            return "Pick a face, then press Start"
         return "Ready. Add more photos of them for a closer match." if n == 1 else f"Ready. Blending {n} photos."
 
     def say(self, text, error=False):
@@ -545,8 +747,6 @@ class Window(QWidget):
 
     # ── face photo ──
     def choose(self):
-        if self.worker:
-            return
         paths, _ = QFileDialog.getOpenFileNames(self, "Choose photos of the same person", "",
                                                 "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
         for path in paths:
@@ -556,11 +756,11 @@ class Window(QWidget):
         md = e.mimeData()
         if md.hasImage() or md.hasUrls() or md.hasHtml():
             e.acceptProposedAction()
-            if not self.worker:
+            if not self.live:
                 self.show_idle(hover=True)
 
     def dragLeaveEvent(self, e):
-        if not self.worker:
+        if not self.live:
             self.show_idle()
 
     def dropEvent(self, e):
@@ -600,11 +800,13 @@ class Window(QWidget):
 
     def use(self, img: QImage):
         if img.isNull():
-            if not self.worker:
+            if not self.live:
                 self.show_idle()
             return self.say("That wasn't an image. Try dragging the picture itself.", True)
         os.makedirs(FACES, exist_ok=True)
-        img.save(os.path.join(FACES, f"{time.time_ns()}.png"), "PNG")  # one format OpenCV always reads
+        path = os.path.join(FACES, f"{time.time_ns()}.png")
+        img.save(path + ".part", "PNG")  # PNG: one format OpenCV always reads
+        os.replace(path + ".part", path)  # the camera thread never sees half a file
         for old in face_files()[:-MAX_FACES]:
             os.remove(old)
         self.thumbs = [QPixmap(f) for f in face_files()]
@@ -612,8 +814,9 @@ class Window(QWidget):
         self.set_preset(None)
         if self.worker:
             self.worker.reload_face = True
-        else:
+        if not self.live:
             self.show_idle()
+        if not self.swapping:
             self.say(self.ready_text())
         self.sync()
 
@@ -622,33 +825,60 @@ class Window(QWidget):
             os.remove(f)
         self.thumbs, self.has_face = [], False
         self.set_preset(None)
-        if not self.worker:
+        if self.swapping:
+            self.swapping = self.worker.on = False
+        if not self.live:
             self.show_idle()
-            self.say("Pick a face, then press Start")
+        self.say(self.ready_text())
         self.sync()
 
     # ── run ──
-    def toggle(self):
-        if self.worker:
-            self.worker.running = False
-            return
+    def open_camera(self):
         self.worker = Worker(self.cameras.currentData())
-        self.worker.frame.connect(lambda img: self.stage.setPixmap(
-            rounded(QPixmap.fromImage(img), self.STAGE_W, self.STAGE_H, thumbs=self.strip(True))))
+        self.worker.frame.connect(self.show_frame)
         self.worker.status.connect(self.say)
+        self.worker.mode.connect(self.on_mode)
         self.worker.finished.connect(self.ended)
-        self.stage.setStyleSheet(f"border: none; background: {BG};")
-        if self.thumbs:  # dim the photo until the first live frame replaces it
-            self.stage.setPixmap(rounded(self.thumbs[-1], self.STAGE_W, self.STAGE_H, thumbs=self.strip(True), dim=True))
+        self.worker.on = self.swapping
         self.worker.start()
+
+    def show_frame(self, rgb):
+        h, w = rgb.shape[:2]
+        img = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        self.stage.setPixmap(rounded(QPixmap.fromImage(img), self.STAGE_W, self.STAGE_H, thumbs=self.strip(True)))
+
+    def switch_camera(self):
+        if self.worker:
+            self.reopen = True
+            self.worker.running = False
+        else:
+            self.open_camera()
+
+    def on_mode(self, mode):
+        self.live = True
+        self.stage.setStyleSheet(f"border: none; background: {BG};")
+        if mode == "you" and self.swapping:  # the worker refused (no face in the photos)
+            self.swapping = False
+        if not self.status.styleSheet().startswith(f"color: {ERROR_RED}") or mode == "swapping":
+            self.say("Live. In Discord, pick OBS Virtual Camera." if mode == "swapping" else self.ready_text())
+        self.sync()
+
+    def toggle(self):
+        if not self.worker:  # camera didn't open earlier; try again
+            self.open_camera()
+            return
+        self.swapping = self.worker.on = not self.swapping
+        if self.swapping and not self.worker.ready:
+            self.say("Loading the face models…")
         self.sync()
 
     def ended(self):
-        error = self.status.styleSheet().startswith(f"color: {ERROR_RED}")
-        self.worker = None
+        self.worker, self.live = None, False
+        if self.reopen:
+            self.reopen = False
+            return self.open_camera()
+        self.swapping = False
         self.show_idle()
-        if not error:
-            self.say(self.ready_text() if self.has_face else "Pick a face, then press Start")
         self.sync()
 
     def closeEvent(self, e):

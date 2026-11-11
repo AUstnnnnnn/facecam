@@ -25,6 +25,7 @@ final class Engine: ObservableObject {
     var face: NSImage? { faces.last }
     @Published var running = false   // sidecar process alive
     @Published var live = false      // frames reaching the virtual camera
+    @Published var swapping = false  // wearing the face; off means the camera shows you
     @Published var status = ""
     @Published var failed = false
     @Published var needsOBSSetup = false
@@ -35,6 +36,7 @@ final class Engine: ObservableObject {
     private var proc: Process?
     private var input: FileHandle?
     private var stopping = false
+    private var reopen = false
     private let faceDir = supportDir.appendingPathComponent("faces")
     private let presetDir = supportDir.appendingPathComponent("presets")
     static let maxFaces = 5
@@ -161,7 +163,7 @@ final class Engine: ObservableObject {
             DispatchQueue.main.async {
                 self.cameras = cams
                 if self.camera == -1 { self.camera = cams.first?.index ?? -1 }
-                if cams.isEmpty { self.fail("No camera found") }
+                if cams.isEmpty { self.fail("No camera found") } else { self.connect() }
             }
         }
     }
@@ -196,6 +198,7 @@ final class Engine: ObservableObject {
 
     func clearFaces() {
         faceFiles.forEach { try? FileManager.default.removeItem(at: $0) }
+        if swapping { send("off"); swapping = false }
         faces = []; status = ""; failed = false; preset = nil
     }
 
@@ -206,7 +209,7 @@ final class Engine: ObservableObject {
         else { return fail("That wasn't an image. Try dragging the picture itself.") }
         DispatchQueue.main.async {
             try? FileManager.default.createDirectory(at: self.faceDir, withIntermediateDirectories: true)
-            try? png.write(to: self.faceDir.appendingPathComponent("\(Int(Date().timeIntervalSince1970 * 1000)).png"))
+            try? png.write(to: self.faceDir.appendingPathComponent("\(Int(Date().timeIntervalSince1970 * 1000)).png"), options: .atomic)
             for old in self.faceFiles.dropLast(Engine.maxFaces) { try? FileManager.default.removeItem(at: old) }
             self.faces = Array((self.faces + [img]).suffix(Engine.maxFaces))
             self.preset = nil
@@ -216,11 +219,11 @@ final class Engine: ObservableObject {
         }
     }
 
-    // MARK: Start / stop
+    // MARK: Camera on from launch; Start/Stop scans the face in and out
 
-    func toggle() { running ? stop() : start() }
-
-    private func start() {
+    /// Opens the camera and starts the virtual camera showing you as you are.
+    func connect() {
+        guard !running, camera >= 0 else { return }
         AVCaptureDevice.requestAccess(for: .video) { ok in
             DispatchQueue.main.async {
                 guard ok else {
@@ -229,6 +232,20 @@ final class Engine: ObservableObject {
                 self.launch()
             }
         }
+    }
+
+    /// Picked a different camera: reopen on it, keeping the swap on or off as it was.
+    func switchCamera() {
+        guard running else { return connect() }
+        reopen = true
+        stopping = true
+        proc?.terminate()
+    }
+
+    func toggle() {
+        guard running else { return connect() }  // e.g. after setting up OBS
+        swapping.toggle()
+        send(swapping ? "on" : "off")
     }
 
     private func launch() {
@@ -253,34 +270,33 @@ final class Engine: ObservableObject {
         do { try p.run() } catch { return fail("Couldn't start the face engine") }
         proc = p; input = inp.fileHandleForWriting
         stopping = false; failed = false; needsOBSSetup = false
-        running = true; status = "Starting…"
+        running = true; status = "Starting the camera…"
+        if swapping { send("on") }
     }
 
     private func handle(_ msg: String) {
         if msg == "Live" {
-            live = true; failed = false; status = "Live"
+            live = true; failed = false; status = ""
             startPreview()
         } else if msg.hasPrefix("Virtual camera unavailable") {
             needsOBSSetup = true
             fail("OBS Virtual Camera isn't set up yet")
         } else if msg.hasPrefix("No face") {
+            swapping = false
             fail("No face found in those photos. Try clear, front-facing ones.")
+        } else if msg == "Ready" || msg == "Off" || msg == "Swapping" {
+            if !failed { status = "" }
         } else {
             failed = msg.contains("didn't")
             status = msg
         }
     }
 
-    private func stop() {
-        stopping = true
-        proc?.terminate()
-    }
-
     private func ended() {
         session.stopRunning()
         if !stopping && !failed { fail("The face engine stopped. Details in ~/Library/Logs/Facecam.log") }
-        else if stopping { status = face == nil ? "" : "Ready" }
         running = false; live = false; proc = nil; input = nil
+        if reopen { reopen = false; connect() } else { swapping = false }
     }
 
     private func send(_ line: String) { try? input?.write(contentsOf: Data((line + "\n").utf8)) }
@@ -358,15 +374,17 @@ struct ContentView: View {
                 }
                 .labelsHidden()
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .disabled(engine.running || engine.cameras.isEmpty)
+                .disabled(engine.cameras.isEmpty)
+                .onChange(of: engine.camera) { old, _ in if old >= 0 { engine.switchCamera() } }
                 Button(action: engine.toggle) {
-                    Text(engine.running ? "Stop" : "Start").frame(minWidth: 56)
+                    Text(engine.swapping ? "Stop" : "Start").frame(minWidth: 56)
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
-                .tint(engine.running ? .red : brand)
+                .tint(engine.swapping ? .red : brand)
                 .keyboardShortcut(.defaultAction)
-                .disabled(!engine.running && (engine.face == nil || engine.camera < 0))
+                .disabled(!engine.swapping && (engine.face == nil || engine.camera < 0 || (engine.running && !engine.live)))
+                .help(engine.swapping ? "Scan back to your own face" : "Scan their face onto yours")
             }
             statusLine
         }
@@ -400,16 +418,16 @@ struct ContentView: View {
     }
 
     var stage: some View {
-        corner.fill(.black.opacity(engine.face == nil ? 0.06 : 1))
+        corner.fill(.black.opacity(engine.face == nil && !engine.live ? 0.06 : 1))
             .aspectRatio(16 / 9, contentMode: .fit)
             .overlay { stageContent }
             .clipShape(corner)
             .overlay(
                 corner.strokeBorder(targeted ? brand : Color.secondary.opacity(engine.face == nil ? 0.5 : 0.15),
-                                    style: StrokeStyle(lineWidth: targeted ? 2 : 1, dash: engine.face == nil && !targeted ? [5, 4] : []))
+                                    style: StrokeStyle(lineWidth: targeted ? 2 : 1, dash: engine.face == nil && !engine.live && !targeted ? [5, 4] : []))
             )
             .contentShape(corner)
-            .onTapGesture { if !engine.live { engine.choose() } }
+            .onTapGesture { if !engine.live || engine.faces.isEmpty { engine.choose() } }
             .modifier(DropTarget(engine: engine, targeted: $targeted))
             .animation(.easeOut(duration: 0.15), value: targeted)
     }
@@ -418,6 +436,14 @@ struct ContentView: View {
         ZStack {
             if engine.live {
                 PreviewView(session: engine.session)
+                if engine.faces.isEmpty && !targeted {
+                    Label("Drop a face photo to wear it", systemImage: "face.dashed")
+                        .font(.callout.weight(.medium)).foregroundStyle(.white)
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(12)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                }
             } else if let face = engine.face {
                 // Fill inside a fixed box so the photo can't stretch the stack past the stage.
                 Color.clear.overlay { Image(nsImage: face).resizable().scaledToFill() }.clipped()
@@ -469,17 +495,25 @@ struct ContentView: View {
 
     var statusLine: some View {
         HStack(spacing: 6) {
-            if engine.live {
-                Circle().fill(.red).frame(width: 7, height: 7)
-                Text("Live").fontWeight(.semibold)
-                Text("In Discord, pick OBS Virtual Camera").foregroundStyle(.secondary)
-            } else if engine.status == "Ready" {
+            if engine.failed || (!engine.status.isEmpty && !engine.live && engine.status != "Ready") {
+                Text(engine.status).foregroundStyle(engine.failed ? Color.red : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if !engine.live && engine.status == "Ready" {
                 Text(engine.faces.count == 1 ? "Ready. Add more photos of them for a closer match."
                                              : "Ready. Blending \(engine.faces.count) photos.")
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if engine.live && engine.swapping {
+                Circle().fill(.red).frame(width: 7, height: 7)
+                Text("Live").fontWeight(.semibold)
+                Text("In Discord, pick OBS Virtual Camera").foregroundStyle(.secondary)
+            } else if engine.live {
+                Circle().fill(.secondary).frame(width: 7, height: 7)
+                Text(engine.face == nil ? "Camera on, showing you. Drop a photo to wear their face."
+                     : engine.faces.count == 1 ? "Showing you. Press Start to switch faces."
+                     : "Showing you. Press Start to wear a blend of \(engine.faces.count) photos.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else if !engine.status.isEmpty {
-                Text(engine.status).foregroundStyle(engine.failed ? Color.red : .secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(engine.status).foregroundStyle(.secondary)
             } else {
                 Text("Pick a face, then press Start").foregroundStyle(.secondary)
             }
@@ -740,8 +774,10 @@ final class KeyWindow: NSWindow { override var isKeyWindow: Bool { true }; overr
         ("ready", { $0.faces = one; $0.status = "Ready" }),
         ("blend", { $0.faces = three; $0.status = "Ready" }),
         ("preset", { $0.faces = three; $0.preset = "Gorilla"; $0.status = "Ready" }),
-        ("starting", { $0.faces = one; $0.running = true; $0.status = "Loading models…" }),
-        ("live", { $0.faces = three; $0.running = true; $0.live = true }),
+        ("starting", { $0.faces = one; $0.running = true; $0.status = "Starting the camera…" }),
+        ("you", { $0.faces = three; $0.running = true; $0.live = true }),
+        ("you-noface", { $0.faces = []; $0.running = true; $0.live = true }),
+        ("live", { $0.faces = three; $0.running = true; $0.live = true; $0.swapping = true }),
         ("obs", { $0.faces = one; $0.failed = true; $0.needsOBSSetup = true; $0.status = "OBS Virtual Camera isn't set up yet" }),
     ]
     let setupStates: [(String, (Setup) -> Void)] = [
