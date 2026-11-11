@@ -55,12 +55,29 @@ h1 em { font-style: normal; color: var(--orange); }
 .lede { font-size: 19px; color: var(--dim); margin: 0 0 32px; max-width: 34ch; }
 .lede strong { color: var(--text); font-weight: 500; }
 .downloads { display: flex; flex-wrap: wrap; gap: 12px; }
-.btn { display: inline-flex; align-items: center; gap: 10px; padding: 14px 18px; border-radius: 12px; font: 600 16px/1 var(--body); text-decoration: none; border: 1px solid var(--line); background: var(--raise); color: var(--text); transition: background .2s var(--ease), transform .2s var(--ease), border-color .2s var(--ease); }
-.btn:hover { background: #242427; color: var(--text); border-color: #3a3a3e; }
-.btn:active { transform: translateY(1px); }
+/* Acrylic: translucent fill, blurred backdrop, a lit top edge and a diffuse sheen.
+   On hover a soft light pools under the pointer; it fades both ways, so moving
+   from one button to the other never snaps. No lift, so the hit area stays put. */
+.btn { --x: 50%; --y: 0%; position: relative; overflow: hidden; isolation: isolate; display: inline-flex; align-items: center; gap: 10px; padding: 14px 18px; border-radius: 12px; font: 600 16px/1 var(--body); text-decoration: none;
+  color: var(--text); background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
+  backdrop-filter: blur(14px) saturate(160%); -webkit-backdrop-filter: blur(14px) saturate(160%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14), inset 0 -1px 0 rgba(0,0,0,.25), 0 8px 20px -10px rgba(0,0,0,.7);
+  transition: background .3s var(--ease), border-color .3s var(--ease), box-shadow .3s var(--ease), transform .15s var(--ease); }
+.btn::before, .btn::after { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; border-radius: inherit; }
+.btn::before { background: radial-gradient(120% 90% at 50% -20%, rgba(255,255,255,.13), transparent 60%); }
+.btn::after { opacity: 0; transition: opacity .45s var(--ease);
+  background: radial-gradient(160px 110px at var(--x) var(--y), rgba(255,255,255,.16), transparent 70%); }
+.btn:hover { background: rgba(255,255,255,.09); color: var(--text); border-color: rgba(255,255,255,.2);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.2), inset 0 -1px 0 rgba(0,0,0,.25), 0 10px 24px -10px rgba(0,0,0,.75); }
+.btn:hover::after { opacity: 1; }
+.btn:active { transform: scale(.98); }
 .btn svg { width: 18px; height: 18px; flex: none; }
-.btn.primary { background: var(--orange); border-color: var(--orange); color: var(--on-orange); }
-.btn.primary:hover { background: var(--orange-hi); border-color: var(--orange-hi); }
+.btn.primary { color: var(--on-orange); background: rgba(255,106,26,.86); border-color: rgba(255,170,120,.5);
+  box-shadow: inset 0 1px 0 rgba(255,225,200,.55), inset 0 -1px 0 rgba(120,30,0,.35), 0 8px 20px -10px rgba(0,0,0,.7); }
+.btn.primary::before { background: radial-gradient(120% 90% at 50% -20%, rgba(255,240,225,.32), transparent 60%); }
+.btn.primary::after { background: radial-gradient(160px 110px at var(--x) var(--y), rgba(255,236,220,.38), transparent 70%); }
+.btn.primary:hover { background: rgba(255,118,45,.9); border-color: rgba(255,190,150,.65);
+  box-shadow: inset 0 1px 0 rgba(255,225,200,.65), inset 0 -1px 0 rgba(120,30,0,.35), 0 10px 24px -10px rgba(0,0,0,.75); }
 .fine { margin: 14px 0 0; font-size: 14px; color: var(--dim); }
 
 /* The viewfinder: the app's own glyph, locking onto the photo */
@@ -94,10 +111,16 @@ h2 { font: 700 clamp(32px, 4.4vw, 52px)/1.02 var(--display); letter-spacing: -.0
 .shot-cap { margin: 12px 2px 0; font-size: 14px; color: var(--dim); }
 
 /* Install */
-.tabs { display: inline-flex; padding: 4px; gap: 4px; border-radius: 12px; background: var(--raise); border: 1px solid var(--line); margin-bottom: 36px; }
+.tabs { position: relative; display: inline-flex; padding: 4px; gap: 4px; border-radius: 12px; background: var(--raise); border: 1px solid var(--line); margin-bottom: 36px; }
 .tabs button { appearance: none; border: 0; background: none; color: var(--dim); font: 600 15px/1 var(--body); padding: 10px 18px; border-radius: 9px; cursor: pointer; transition: background .2s var(--ease), color .2s var(--ease); }
 .tabs button:hover { color: var(--text); }
-.tabs button[aria-selected="true"] { background: #2a2a2e; color: var(--text); }
+.tabs button { position: relative; z-index: 1; }
+.tabs button[aria-selected="true"] { color: var(--text); }
+/* One pill slides under the selected tab. */
+.tabs .pill { position: absolute; top: 4px; bottom: 4px; left: 0; border-radius: 9px; background: #2a2a2e;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08); transition: transform .45s var(--ease), width .45s var(--ease); }
+.panel.in { animation: panel-in .5s var(--ease); }
+@keyframes panel-in { from { opacity: 0; transform: translateY(8px); filter: blur(4px); } }
 .panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; }
 .panel[hidden] { display: none; }
 .panel h3 { font: 700 22px/1.2 var(--display); letter-spacing: -.01em; margin: 0 0 16px; }
@@ -148,7 +171,9 @@ footer p { margin: 0 0 8px; max-width: 62ch; }
 }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  .frame i, .btn, summary::after { transition: none !important; }
+  .frame i, .btn, summary::after, .tabs .pill { transition: none !important; }
+  .panel.in { animation: none; }
+  .btn::after { transition: none; }
 }
 </style>
 </head>
@@ -222,6 +247,7 @@ footer p { margin: 0 0 8px; max-width: 62ch; }
       <div class="tabs" role="tablist" aria-label="Your computer">
         <button role="tab" id="tab-mac" aria-controls="p-mac" aria-selected="true">Mac</button>
         <button role="tab" id="tab-win" aria-controls="p-win" aria-selected="false" tabindex="-1">Windows</button>
+        <span class="pill" aria-hidden="true"></span>
       </div>
 
       <div class="panel" id="p-mac" role="tabpanel" aria-labelledby="tab-mac">
@@ -321,17 +347,37 @@ const first = document.getElementById(isWin ? "dl-win" : "dl-mac");
 first.classList.add("primary");
 first.parentNode.prepend(first);
 
+// Acrylic buttons: the hover light follows the pointer.
+document.querySelectorAll(".btn").forEach(b => b.addEventListener("pointermove", e => {
+  const r = b.getBoundingClientRect();
+  b.style.setProperty("--x", `${e.clientX - r.left}px`);
+  b.style.setProperty("--y", `${e.clientY - r.top}px`);
+}));
+
 // Tabs
 const tabs = [...document.querySelectorAll('[role="tab"]')];
+const pill = document.querySelector(".tabs .pill");
+function place(tab) {
+  pill.style.width = `${tab.offsetWidth}px`;
+  pill.style.transform = `translateX(${tab.offsetLeft}px)`;
+}
 function pick(tab, focus) {
   for (const t of tabs) {
     const on = t === tab;
+    const panel = document.getElementById(t.getAttribute("aria-controls"));
+    if (on && panel.hidden) { panel.classList.remove("in"); void panel.offsetWidth; panel.classList.add("in"); }
     t.setAttribute("aria-selected", on);
     t.tabIndex = on ? 0 : -1;
-    document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+    panel.hidden = !on;
   }
+  place(tab);
   if (focus) tab.focus();
 }
+// Start without sliding in from the left; fonts can change tab widths, so re-place once they load.
+pill.style.transition = "none";
+place(tabs[0]);
+requestAnimationFrame(() => requestAnimationFrame(() => (pill.style.transition = "")));
+document.fonts?.ready.then(() => place(tabs.find(t => t.getAttribute("aria-selected") === "true")));
 tabs.forEach((t, i) => {
   t.addEventListener("click", () => pick(t));
   t.addEventListener("keydown", e => {
