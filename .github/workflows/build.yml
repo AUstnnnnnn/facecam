@@ -108,3 +108,82 @@ jobs:
         with:
           name: Facecam-Setup
           path: dist/Facecam-Setup.exe
+
+  mac:
+    runs-on: macos-14  # Apple Silicon
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+
+      # Same story as Windows: insightface needs a compiler to install, so ship it built.
+      # The platform override tags it for macOS 11+ instead of the runner's own version.
+      - name: Build insightface wheel
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          _PYTHON_HOST_PLATFORM: macosx-11.0-arm64
+          ARCHFLAGS: -arch arm64
+        run: |
+          uv venv -p 3.12 build-env
+          uv pip install --python build-env/bin/python pip wheel setuptools cython "numpy>=2"
+          build-env/bin/python -m pip wheel insightface==0.7.3 --no-deps --no-build-isolation -w wheels
+          ls wheels
+
+      - name: Publish wheel
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view wheels >/dev/null 2>&1 || gh release create wheels --title "Prebuilt wheels" --notes "insightface 0.7.3 builds the installers download." || true
+          gh release upload wheels wheels/*.whl --clobber
+
+      - name: Build Facecam.app and Facecam.dmg
+        run: mac/build.sh
+
+      # Run setup.sh from inside the built app, exactly as its Install button does.
+      - name: Setup (fresh)
+        run: |
+          echo "FACECAM_SUPPORT=$RUNNER_TEMP/facecam" >> "$GITHUB_ENV"
+          export FACECAM_SUPPORT=$RUNNER_TEMP/facecam
+          export FACECAM_WHEEL=$(ls $PWD/wheels/*.whl)
+          sh mac/dist/Facecam.app/Contents/Resources/setup.sh
+          test -f "$FACECAM_SUPPORT/ready"
+          test -d /Applications/OBS.app
+
+      - name: Setup again (should skip everything)
+        run: |
+          export FACECAM_WHEEL=$(ls $PWD/wheels/*.whl)
+          sh mac/dist/Facecam.app/Contents/Resources/setup.sh | tee again.log
+          test "$(grep -c 'Already installed.' again.log)" -ge 4
+
+      - name: Swap self-test (demo frames)
+        run: |
+          PY=$FACECAM_SUPPORT/venv/bin/python
+          $PY -c "
+          import cv2, sys
+          for n, at in (('ludwig', 0), ('movie', 10)):
+              c = cv2.VideoCapture(sys.argv[1] + '/engine/media/%s.gif' % n); c.set(cv2.CAP_PROP_POS_FRAMES, at)
+              ok, f = c.read(); assert ok; cv2.imwrite('$RUNNER_TEMP/%s.png' % n, f)
+          " "$FACECAM_SUPPORT"
+          $PY mac/dist/Facecam.app/Contents/Resources/bridge.py selftest $RUNNER_TEMP/ludwig.png $RUNNER_TEMP/movie.png $RUNNER_TEMP/out.png
+
+      - name: Presets and UI snapshots
+        run: |
+          mkdir -p mac-screens
+          FACECAM_SUPPORT=$RUNNER_TEMP/presets mac/dist/Facecam.app/Contents/MacOS/Facecam --presettest $RUNNER_TEMP/ludwig.png
+          FACECAM_SUPPORT=$RUNNER_TEMP/empty mac/dist/Facecam.app/Contents/MacOS/Facecam --snapshot $PWD/mac-screens $RUNNER_TEMP/ludwig.png
+          cp $RUNNER_TEMP/out.png mac-screens/swap.png
+          ls mac-screens
+
+      - name: Publish Facecam.dmg
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view mac >/dev/null 2>&1 || gh release create mac --title "Facecam for Mac" --notes "Download Facecam.dmg, open it and drag Facecam into Applications."
+          gh release upload mac mac/dist/Facecam.dmg --clobber
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: mac-screens
+          path: mac-screens
