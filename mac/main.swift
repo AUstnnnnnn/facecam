@@ -358,6 +358,30 @@ struct DropTarget: ViewModifier {
     }
 }
 
+/// Pop-up look with the chevron badge in Facecam orange. The system pop-ups always
+/// use the Mac's own accent colour, whatever tint the app asks for.
+struct DropdownLabel: View {
+    let text: String
+    let symbol: String
+    @Environment(\.isEnabled) private var enabled
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(text).lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 0)
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 18, height: 18)
+                .background(enabled ? brand : Color.secondary.opacity(0.5), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        .padding(.leading, 9).padding(.trailing, 3).frame(height: 24)
+        .background(Color(nsColor: .controlColor), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color.primary.opacity(0.12)))
+        .shadow(color: .black.opacity(0.12), radius: 0.5, y: 0.5)
+        .contentShape(Rectangle())
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var engine: Engine
     @State private var targeted = false
@@ -368,11 +392,17 @@ struct ContentView: View {
             stage
             HStack(spacing: 8) {
                 presetsMenu
-                Picker("Camera", selection: $engine.camera) {
-                    if engine.cameras.isEmpty { Text("Finding cameras…").tag(-1) }
-                    ForEach(engine.cameras, id: \.index) { Text($0.name).tag($0.index) }
+                Menu {
+                    ForEach(engine.cameras, id: \.index) { cam in
+                        Button { engine.camera = cam.index } label: {
+                            if cam.index == engine.camera { Label(cam.name, systemImage: "checkmark") } else { Text(cam.name) }
+                        }
+                    }
+                } label: {
+                    DropdownLabel(text: engine.cameras.first { $0.index == engine.camera }?.name ?? "Finding cameras…",
+                                  symbol: "chevron.up.chevron.down")
                 }
-                .labelsHidden()
+                .menuStyle(.button).buttonStyle(.plain)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .disabled(engine.cameras.isEmpty)
                 .onChange(of: engine.camera) { old, _ in if old >= 0 { engine.switchCamera() } }
@@ -411,8 +441,9 @@ struct ContentView: View {
                 }
             }
         } label: {
-            Text(engine.preset ?? "Presets").lineLimit(1)
+            DropdownLabel(text: engine.preset ?? "Presets", symbol: "chevron.down")
         }
+        .menuStyle(.button).buttonStyle(.plain)
         .fixedSize()
         .help("Save these photos as a preset, or switch to a saved one")
     }
