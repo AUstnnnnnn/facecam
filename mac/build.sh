@@ -47,10 +47,8 @@ cat > "$APP/Contents/Info.plist" <<P
 P
 codesign -fs - "$APP"
 
-# Disk image: the app plus an Applications shortcut to drag it onto.
-mkdir dist/dmg && cp -R "$APP" dist/dmg/ && ln -s /Applications dist/dmg/Applications
-hdiutil create -quiet -volname Facecam -srcfolder dist/dmg -format UDZO -ov dist/Facecam.dmg
-rm -rf dist/dmg
+# Disk image: a drag-to-Applications window with instructions in the background (see dmg.py).
+uvx --from dmgbuild==1.6.7 dmgbuild -s dmg.py Facecam dist/Facecam.dmg >/dev/null
 echo "built $APP and dist/Facecam.dmg"
 
 if [ "$1" = "--install" ]; then
