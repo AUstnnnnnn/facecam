@@ -9,8 +9,8 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
 
       # insightface has no Windows wheel on PyPI and building it needs Visual
       # Studio, so build it once here and publish it for install.bat.
@@ -31,28 +31,80 @@ jobs:
           gh release view wheels >/dev/null 2>&1 || gh release create wheels --title "Prebuilt wheels" --notes "insightface 0.7.3 for Windows, Python 3.12. install.bat downloads it."
           gh release upload wheels wheels/*.whl --clobber
 
-      - name: Install
+      - name: Build installer
+        shell: cmd
+        run: |
+          choco install innosetup -y --no-progress
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" installer\facecam.iss
+
+      # Install exactly what a user gets: the .exe, silently, into a temp folder.
+      - name: Install with Facecam-Setup.exe
         shell: cmd
         env:
           FACECAM_CI: "1"
-          FACECAM_WHEEL: wheels\insightface-0.7.3-cp312-cp312-win_amd64.whl
-        run: install.bat
+        run: |
+          set FACECAM_WHEEL=%GITHUB_WORKSPACE%\wheels\insightface-0.7.3-cp312-cp312-win_amd64.whl
+          start /wait dist\Facecam-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="%RUNNER_TEMP%\setup.log"
+          set APP=%LOCALAPPDATA%\Programs\Facecam
+          type "%APP%\install.log"
+          if not exist "%APP%\.venv\Scripts\pythonw.exe" exit /b 1
+          if not exist "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Facecam.lnk" exit /b 1
+          findstr /c:"Face models installed." "%APP%\install.log" || exit /b 1
+
+      - name: Run the installer again (should skip everything)
+        shell: cmd
+        env:
+          FACECAM_CI: "1"
+        run: |
+          set FACECAM_WHEEL=%GITHUB_WORKSPACE%\wheels\insightface-0.7.3-cp312-cp312-win_amd64.whl
+          start /wait dist\Facecam-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+          set APP=%LOCALAPPDATA%\Programs\Facecam
+          type "%APP%\install.log"
+          findstr /c:"Face models already installed." "%APP%\install.log" || exit /b 1
+          for /f %%n in ('findstr /c:"Already installed." "%APP%\install.log" ^| find /c /v ""') do if %%n LSS 3 exit /b 1
 
       - name: Self-test (CPU, demo frames)
         shell: cmd
         env:
           FACECAM_CPU: "1"
-        run: .venv\Scripts\python.exe facecam.py --selftest
+        run: |
+          set APP=%LOCALAPPDATA%\Programs\Facecam
+          "%APP%\.venv\Scripts\python.exe" "%APP%\facecam.py" --selftest
 
-      - name: End to end (window, drops, swap, OBS Virtual Camera)
+      # The tests import facecam from the folder above them, so run them from inside the install.
+      - name: Windowless launch (pythonw has no stdout/stderr)
+        shell: cmd
+        run: |
+          set APP=%LOCALAPPDATA%\Programs\Facecam
+          xcopy /y /i .github\*.py "%APP%\.github\"
+          "%APP%\.venv\Scripts\python.exe" "%APP%\.github\test_windowless_stdio.py"
+
+      - name: End to end (window, drops, presets, swap, OBS Virtual Camera)
         shell: cmd
         env:
           FACECAM_CPU: "1"
-          E2E_OUT: e2e-out
-        run: .venv\Scripts\python.exe .github\e2e.py
+        run: |
+          set APP=%LOCALAPPDATA%\Programs\Facecam
+          set E2E_OUT=%GITHUB_WORKSPACE%\e2e-out
+          "%APP%\.venv\Scripts\python.exe" "%APP%\.github\e2e.py"
 
-      - uses: actions/upload-artifact@v4
+      - name: Publish installer
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view setup >/dev/null 2>&1 || gh release create setup --title "Facecam for Windows" --notes "Download Facecam-Setup.exe and run it."
+          gh release upload setup dist/Facecam-Setup.exe --clobber
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: always()
         with:
           name: e2e-screens
-          path: engine/e2e-out
+          path: e2e-out
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: Facecam-Setup
+          path: dist/Facecam-Setup.exe

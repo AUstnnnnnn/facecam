@@ -105,6 +105,26 @@ for p in photos:
     drop(w, [QUrl.fromLocalFile(p).toString()])
 print("drops ok")
 
+# ── 3b. presets: save, sanitized names, load, menu, delete ──
+fc.PRESETS = tempfile.mkdtemp()
+w.save_preset("Ludwig")
+assert fc.preset_names() == ["Ludwig"] and w.presets.text() == "Ludwig", w.status.text()
+w.save_preset("..\\..\\evil:/*")  # path tricks collapse to a plain name inside PRESETS
+assert fc.preset_names() == ["Ludwig", "evil"], fc.preset_names()
+assert fc.preset_dir(" ... ") is None
+w.clear.click()
+assert w.presets.text() == "Presets" and not w.start.isEnabled()
+w.load_preset("Ludwig")
+assert len(fc.face_files()) == 3 and w.start.isEnabled() and w.presets.text() == "Ludwig"
+assert w.status.text() == "Ready. Blending 3 photos.", w.status.text()
+w.fill_presets_menu()
+items = [a.text() for a in w.presets_menu.actions() if a.text()]
+assert items[:2] == ["Ludwig", "evil"] and items[2].startswith("Save"), items
+w.delete_preset("evil")
+assert fc.preset_names() == ["Ludwig"]
+snap(w, "2b-preset.png")
+print("presets ok")
+
 # ── 4. live run: fake webcam → swap → real OBS Virtual Camera → read back ──
 FEED = [movie] * 6 + [dark] * 4 + [np.zeros_like(movie)] * 12  # face, dim face, no face
 

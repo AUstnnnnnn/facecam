@@ -5,3 +5,7 @@ wheels/
 build-env/
 __pycache__/
 faces/
+presets/
+facecam.log
+install.log
+dist/
